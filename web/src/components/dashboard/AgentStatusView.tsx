@@ -1,4 +1,4 @@
-import type { GatewayStatus } from '../../types';
+import type { GatewayChannelStatus, GatewayStatus } from '../../types';
 import { StatCard } from './StatCard';
 
 interface AgentStatusViewProps {
@@ -74,7 +74,7 @@ function formatStateTag(state: string): string {
 export function AgentStatusView({ status, onRefresh }: AgentStatusViewProps) {
   const titleLabel = 'AGENT STATUS';
   const channelStatuses = status?.channelStatuses ?? [];
-  const renderedChannels = channelStatuses.length > 0
+  const renderedChannels: readonly GatewayChannelStatus[] = channelStatuses.length > 0
     ? channelStatuses
     : status
       ? status.channels.map((channel) => ({

@@ -23,6 +23,7 @@ import type {
   ObservabilityTraceStatus,
   ObservabilityTraceSummary,
 } from '@tetsuo-ai/runtime/browser';
+export type { GatewayChannelStatus } from '@tetsuo-ai/runtime/browser';
 
 // ============================================================================
 // Connection State
