@@ -14,6 +14,7 @@ import type {
   BackgroundRunOperatorErrorPayload,
   BackgroundRunOperatorSummary,
   GatewayBackgroundRunStatus,
+  GatewayChannelStatus,
   ObservabilityArtifactResponse,
   ObservabilityEventRecord,
   ObservabilityLogResponse,
@@ -135,6 +136,7 @@ export interface GatewayStatus {
   state: string;
   uptimeMs: number;
   channels: string[];
+  channelStatuses?: GatewayChannelStatus[];
   activeSessions: number;
   controlPlanePort: number;
   agentName?: string;
