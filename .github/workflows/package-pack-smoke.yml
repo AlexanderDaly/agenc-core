@@ -116,6 +116,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Refresh dependencies for dashboard build
+        run: npm install --no-fund
+
       - name: Build dashboard surface
         run: AGENC_DASHBOARD_BASE=/ui/ npm run build --workspace=@tetsuo-ai/web
 
