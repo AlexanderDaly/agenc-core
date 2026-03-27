@@ -2532,6 +2532,45 @@ export function validateGatewayConfig(obj: unknown): ValidationResult {
           errors,
         );
       }
+      if (obj.logging.llmUsage !== undefined) {
+        if (!isRecord(obj.logging.llmUsage)) {
+          errors.push("logging.llmUsage must be an object");
+        } else {
+          const boolFields = [
+            "enabled",
+            "includeIdentifiers",
+            "includeCallContext",
+            "includePromptShape",
+            "includeBudgetDiagnostics",
+          ];
+          for (const field of boolFields) {
+            if (
+              obj.logging.llmUsage[field] !== undefined &&
+              typeof obj.logging.llmUsage[field] !== "boolean"
+            ) {
+              errors.push(`logging.llmUsage.${field} must be a boolean`);
+            }
+          }
+          if (obj.logging.llmUsage.level !== undefined) {
+            requireOneOf(
+              obj.logging.llmUsage.level,
+              "logging.llmUsage.level",
+              ["debug", "info"] as const,
+              errors,
+            );
+          }
+          if (obj.logging.llmUsage.sampleRate !== undefined &&
+            (typeof obj.logging.llmUsage.sampleRate !== "number" ||
+              !Number.isFinite(obj.logging.llmUsage.sampleRate) ||
+              obj.logging.llmUsage.sampleRate < 0 ||
+              obj.logging.llmUsage.sampleRate > 1)
+          ) {
+            errors.push(
+              "logging.llmUsage.sampleRate must be a number between 0 and 1",
+            );
+          }
+        }
+      }
       if (obj.logging.trace !== undefined) {
         if (!isRecord(obj.logging.trace)) {
           errors.push("logging.trace must be an object");
