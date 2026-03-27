@@ -825,6 +825,83 @@ describe("GrokProvider", () => {
     expect(response.finishReason).toBe("tool_calls");
   });
 
+  it("preserves provider function calls whose JSON arguments contain HTML entities inside string values", async () => {
+    const completion = makeCompletion({
+      output_text: "",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "system.writeFile",
+          arguments:
+            '{"path":"src/parser.c","content":"strcmp(token, \\"&quot;&gt;&quot;\\") == 0 && strcmp(token, \\"&amp;\\") == 0;"}',
+        },
+      ],
+    });
+    mockCreate.mockResolvedValueOnce(completion);
+
+    const provider = new GrokProvider({ apiKey: "test-key" });
+    const response = await provider.chat([
+      { role: "user", content: "write parser.c" },
+    ]);
+
+    expect(response.finishReason).toBe("tool_calls");
+    expect(response.toolCalls).toEqual([
+      {
+        id: "call_1",
+        name: "system.writeFile",
+        arguments:
+          '{"path":"src/parser.c","content":"strcmp(token, \\"\\">\\"\\") == 0 && strcmp(token, \\"&\\") == 0;"}',
+      },
+    ]);
+  });
+
+  it("emits a trace when a provider function call is rejected during normalization", async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeCompletion({
+        output_text: "",
+        output: [
+          {
+            type: "function_call",
+            call_id: "call_bad",
+            name: "system.writeFile",
+            arguments: '["bad"]',
+          },
+        ],
+      }),
+    );
+
+    const events: Array<Record<string, unknown>> = [];
+    const provider = new GrokProvider({ apiKey: "test-key" });
+    const response = await provider.chat(
+      [{ role: "user", content: "write parser.c" }],
+      {
+        trace: {
+          includeProviderPayloads: true,
+          onProviderTraceEvent: (event) => {
+            events.push(event as unknown as Record<string, unknown>);
+          },
+        },
+      },
+    );
+
+    expect(response.toolCalls).toHaveLength(0);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "stream_event",
+          transport: "chat",
+          payload: expect.objectContaining({
+            eventType: "tool_call_validation_failed",
+            failureCode: "non_object_arguments",
+            toolCallId: "call_bad",
+            toolName: "system.writeFile",
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("surfaces provider citations as provider evidence", async () => {
     mockCreate.mockResolvedValueOnce(
       makeCompletion({

@@ -24,8 +24,9 @@ import type {
   LLMRequestMetrics,
   LLMTool,
   StreamProgressCallback,
+  ToolCallValidationFailure,
 } from "../types.js";
-import { validateToolCall } from "../types.js";
+import { validateToolCallDetailed } from "../types.js";
 import { LLMProviderError, mapLLMError } from "../errors.js";
 import { ensureLazyImport } from "../lazy-import.js";
 import {
@@ -88,6 +89,13 @@ interface ProviderResponseTraceMeta {
   readonly responseStatusText?: string;
   readonly responseUrl?: string;
   readonly responseHeaders?: Record<string, string>;
+}
+
+interface ToolCallNormalizationIssue {
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly failure: ToolCallValidationFailure;
+  readonly argumentsPreview?: string;
 }
 
 function createStreamTimeoutError(providerName: string, timeoutMs: number): Error {
@@ -853,6 +861,12 @@ export class GrokProvider implements LLMProvider {
           activePlan.statefulDiagnostics,
           activePlan.compactionDiagnostics,
         );
+        this.emitToolCallNormalizationIssues(
+          parsed.normalizationIssues,
+          options,
+          "chat",
+          parsed.model,
+        );
         if (activePlan.assistantPhaseEnabled) {
           this.assistantPhaseSupported = true;
         }
@@ -1169,9 +1183,17 @@ export class GrokProvider implements LLMProvider {
         }
 
         if (event.type === "response.output_item.done") {
-          const toolCall = this.toToolCall(event.item);
+          const { toolCall, issue } = this.toToolCall(event.item);
           if (toolCall) {
             toolCallAccum.set(toolCall.id, toolCall);
+          }
+          if (issue) {
+            this.emitToolCallNormalizationIssues(
+              [issue],
+              options,
+              "chat_stream",
+              model,
+            );
           }
           continue;
         }
@@ -1190,10 +1212,19 @@ export class GrokProvider implements LLMProvider {
           providerEvidence = this.extractProviderEvidence(
             response as Record<string, unknown>,
           );
-          const completedToolCalls = this.extractToolCallsFromOutput(response.output);
+          const {
+            toolCalls: completedToolCalls,
+            normalizationIssues,
+          } = this.extractToolCallsFromOutput(response.output);
           for (const toolCall of completedToolCalls) {
             toolCallAccum.set(toolCall.id, toolCall);
           }
+          this.emitToolCallNormalizationIssues(
+            normalizationIssues,
+            options,
+            "chat_stream",
+            model,
+          );
           finishReason = this.mapResponseFinishReason(response, Array.from(toolCallAccum.values()));
           responseError = this.extractResponseError(response, finishReason);
           const outputText = String(response.output_text ?? "");
@@ -2083,8 +2114,12 @@ export class GrokProvider implements LLMProvider {
     requestMetrics?: LLMRequestMetrics,
     statefulDiagnostics?: LLMStatefulDiagnostics,
     compactionDiagnostics?: LLMCompactionDiagnostics,
-  ): LLMResponse {
-    const toolCalls = this.extractToolCallsFromOutput(response.output);
+  ): LLMResponse & {
+    normalizationIssues?: readonly ToolCallNormalizationIssue[];
+  } {
+    const { toolCalls, normalizationIssues } = this.extractToolCallsFromOutput(
+      response.output,
+    );
     const finishReason = this.mapResponseFinishReason(response, toolCalls);
     const responseId =
       typeof response?.id === "string" ? String(response.id) : undefined;
@@ -2118,6 +2153,7 @@ export class GrokProvider implements LLMProvider {
       compaction,
       providerEvidence: this.extractProviderEvidence(response),
       finishReason,
+      ...(normalizationIssues.length > 0 ? { normalizationIssues } : {}),
       ...(parsedError ? { error: parsedError } : {}),
     };
   }
@@ -2211,25 +2247,88 @@ export class GrokProvider implements LLMProvider {
     return [...citations];
   }
 
-  private toToolCall(item: unknown): LLMToolCall | null {
-    if (!item || typeof item !== "object") return null;
+  private toToolCall(item: unknown): {
+    toolCall: LLMToolCall | null;
+    issue?: ToolCallNormalizationIssue;
+  } {
+    if (!item || typeof item !== "object") {
+      return { toolCall: null };
+    }
     const candidate = item as Record<string, unknown>;
-    if (candidate.type !== "function_call") return null;
-    return validateToolCall({
+    if (candidate.type !== "function_call") return { toolCall: null };
+    const validation = validateToolCallDetailed({
       id: String(candidate.call_id ?? candidate.id ?? ""),
       name: String(candidate.name ?? ""),
       arguments: String(candidate.arguments ?? ""),
     });
+    if (validation.toolCall) {
+      return { toolCall: validation.toolCall };
+    }
+    return {
+      toolCall: null,
+      issue: {
+        toolCallId:
+          typeof candidate.call_id === "string"
+            ? candidate.call_id
+            : typeof candidate.id === "string"
+              ? candidate.id
+              : undefined,
+        toolName:
+          typeof candidate.name === "string" && candidate.name.trim().length > 0
+            ? candidate.name.trim()
+            : undefined,
+        failure: validation.failure ?? {
+          code: "invalid_shape",
+          message: "Tool call validation failed.",
+        },
+        argumentsPreview:
+          typeof candidate.arguments === "string"
+            ? truncate(candidate.arguments, 240)
+            : undefined,
+      },
+    };
   }
 
-  private extractToolCallsFromOutput(output: unknown): LLMToolCall[] {
-    if (!Array.isArray(output)) return [];
-    const toolCalls: LLMToolCall[] = [];
-    for (const item of output) {
-      const toolCall = this.toToolCall(item);
-      if (toolCall) toolCalls.push(toolCall);
+  private extractToolCallsFromOutput(output: unknown): {
+    toolCalls: LLMToolCall[];
+    normalizationIssues: ToolCallNormalizationIssue[];
+  } {
+    if (!Array.isArray(output)) {
+      return { toolCalls: [], normalizationIssues: [] };
     }
-    return toolCalls;
+    const toolCalls: LLMToolCall[] = [];
+    const normalizationIssues: ToolCallNormalizationIssue[] = [];
+    for (const item of output) {
+      const { toolCall, issue } = this.toToolCall(item);
+      if (toolCall) toolCalls.push(toolCall);
+      if (issue) normalizationIssues.push(issue);
+    }
+    return { toolCalls, normalizationIssues };
+  }
+
+  private emitToolCallNormalizationIssues(
+    issues: readonly ToolCallNormalizationIssue[] | undefined,
+    options: LLMChatOptions | undefined,
+    transport: "chat" | "chat_stream",
+    model: string,
+  ): void {
+    if (!issues || issues.length === 0) return;
+    for (const issue of issues) {
+      emitProviderTraceEvent(options, {
+        kind: "stream_event",
+        transport,
+        provider: this.name,
+        model,
+        payload: {
+          eventType: "tool_call_validation_failed",
+          failureCode: issue.failure.code,
+          failureMessage: issue.failure.message,
+          toolCallId: issue.toolCallId,
+          toolName: issue.toolName,
+          argumentsPreview: issue.argumentsPreview,
+        },
+      });
+    }
   }
 
   private mapResponseFinishReason(
